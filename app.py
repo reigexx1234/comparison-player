@@ -3,113 +3,82 @@ import pandas as pd
 import soccerdata as sd
 
 st.set_page_config(page_title="Pro Football Scout", layout="wide")
-st.title("⚽ Детальное сравнение игроков")
+st.title("⚽ Профессиональный скаут-инструмент")
 
-# --- БОКОВАЯ ПАНЕЛЬ: ВВОД ДАННЫХ ---
-st.sidebar.header("Настройки поиска")
-p1_id = st.sidebar.text_input("ID Игрока №1", value="819b6927") # Салах
-p2_id = st.sidebar.text_input("ID Игрока №2", value="b8e7402a") # Холанд
-
-# --- БОКОВАЯ ПАНЕЛЬ: ФИЛЬТРЫ ---
-st.sidebar.markdown("---")
-st.sidebar.header("Фильтры турниров и матчей")
-
-# Выбор режима работы
-mode = st.sidebar.radio(
-    "Выберите режим сравнения:",
-    ["Весь сезон (Суммарно)", "Конкретный турнир", "Последние 5 матчей"]
-)
-
-# Если выбран конкретный турнир, даем возможность вписать его название
-# (В идеале здесь должен быть выпадающий список, но для простоты начнем с ввода)
-selected_comp = None
-if mode == "Конкретный турнир":
-    selected_comp = st.sidebar.selectbox(
-        "Выберите турнир:", 
-        ["Premier League", "Champions Lg", "La Liga", "Serie A", "Bundesliga"]
-    )
-
-# --- ФУНКЦИИ ПОЛУЧЕНИЯ ДАННЫХ ---
-@st.cache_data(ttl=3600)
-def get_season_data(p_id, comp_filter=None):
-    """Получает статистику за сезон (с фильтром по турниру или без)"""
+# --- ФУНКЦИЯ ЗАГРУЗКИ СПИСКА ИГРОКОВ ---
+@st.cache_data(ttl=86400) # Кэшируем список на 24 часа
+def load_player_list():
     try:
         fb = sd.FBref()
+        # Получаем статистику, чтобы вытащить из неё имена и ID
+        # Для скорости берем только одну лигу для инициализации, 
+        # но поиск будет работать по тем, кто загружен.
         df = fb.read_player_season_stats(stat_type="standard")
-        player_df = df.xs(p_id, level='player')
+        df_flat = df.reset_index()
         
-        if comp_filter:
-            # Ищем строки, где в названии турнира есть выбранный (например, Premier League)
-            player_df = player_df[player_df.index.get_level_values('Comp').str.contains(comp_filter, na=False)]
-            if player_df.empty:
-                return None
-            return player_df.iloc[-1] # Берем последний сезон в этом турнире
-        else:
-            # Если фильтра нет, берем строку, где турнир указан как комбинированный, 
-            # либо просто самую свежую общую строку
-            return player_df.iloc[-1] 
-    except Exception as e:
-        return None
+        # Создаем словарь: "Имя (Команда)" -> ID
+        df_flat['display_name'] = df_flat['player'] + " (" + df_flat['Squad'] + ")"
+        player_dict = pd.Series(df_flat.player_id.values, index=df_flat.display_name).to_dict()
+        return player_dict
+    except:
+        # Резервный список, если FBref недоступен
+        return {"Lionel Messi": "d70ce98e", "Kylian Mbappé": "42fd4c3c"}
 
+# Загружаем базу
+with st.spinner("Загрузка базы игроков..."):
+    PLAYER_DB = load_player_list()
+    player_names = sorted(list(PLAYER_DB.keys()))
+
+# --- БОКОВАЯ ПАНЕЛЬ ---
+st.sidebar.header("Поиск")
+
+# Поиск с автодополнением (работает при вводе 3+ букв)
+p1_select = st.sidebar.selectbox("Игрок №1:", player_names, index=0 if len(player_names) > 0 else 0)
+p2_select = st.sidebar.selectbox("Игрок №2:", player_names, index=1 if len(player_names) > 1 else 0)
+
+p1_id = PLAYER_DB[p1_select]
+p2_id = PLAYER_DB[p2_select]
+
+st.sidebar.markdown("---")
+mode = st.sidebar.radio("Режим:", ["Весь сезон", "Последние 5 матчей"])
+
+# --- ПОЛУЧЕНИЕ ДАННЫХ ---
 @st.cache_data(ttl=3600)
-def get_match_logs(p_id):
-    """Получает статистику по отдельным матчам"""
+def get_stats(p_id, match_logs=False):
+    fb = sd.FBref()
     try:
-        fb = sd.FBref()
-        # Загружаем логи матчей за текущий сезон
-        df = fb.read_player_match_logs(stat_type="summary")
-        player_logs = df.xs(p_id, level='player')
-        return player_logs.tail(5) # Возвращаем 5 последних матчей
-    except Exception as e:
+        if match_logs:
+            df = fb.read_player_match_logs(stat_type="summary")
+            return df.xs(p_id, level='player').tail(5)
+        else:
+            df = fb.read_player_season_stats(stat_type="standard")
+            return df.xs(p_id, level='player').iloc[-1]
+    except:
         return None
 
-# --- ОСНОВНОЙ ЭКРАН: ВЫВОД РЕЗУЛЬТАТОВ ---
+# --- ВЫВОД ---
 if st.sidebar.button("Сравнить"):
-    with st.spinner("Загрузка данных с FBref (может занять до минуты)..."):
+    if mode == "Весь сезон":
+        d1 = get_stats(p1_id)
+        d2 = get_stats(p2_id)
+        if d1 is not None and d2 is not None:
+            st.subheader("📊 Итоги сезона")
+            res = pd.DataFrame({
+                "Метрика": ["Команда", "Матчи", "Голы", "xG"],
+                p1_select: [d1['Squad'], d1['MP'], d1['Gls'], d1['xG']],
+                p2_select: [d2['Squad'], d2['MP'], d2['Gls'], d2['xG']]
+            })
+            st.table(res)
+    
+    elif mode == "Последние 5 матчей":
+        l1 = get_stats(p1_id, True)
+        l2 = get_stats(p2_id, True)
         
-        # ЛОГИКА ДЛЯ СЕЗОНА И ТУРНИРОВ
-        if mode in ["Весь сезон (Суммарно)", "Конкретный турнир"]:
-            comp_to_search = selected_comp if mode == "Конкретный турнир" else None
-            
-            data1 = get_season_data(p1_id, comp_to_search)
-            data2 = get_season_data(p2_id, comp_to_search)
-            
-            if data1 is not None and data2 is not None:
-                st.subheader(f"📊 Сравнение: {mode}")
-                if comp_to_search:
-                    st.caption(f"Турнир: {comp_to_search}")
-
-                res = pd.DataFrame({
-                    "Метрика": ["Сыграно матчей (MP)", "Голы (Gls)", "Ассисты (Ast)", "xG", "Желтые карточки (CrdY)"],
-                    "Игрок 1": [data1.get('MP', 0), data1.get('Gls', 0), data1.get('Ast', 0), data1.get('xG', 0), data1.get('CrdY', 0)],
-                    "Игрок 2": [data2.get('MP', 0), data2.get('Gls', 0), data2.get('Ast', 0), data2.get('xG', 0), data2.get('CrdY', 0)]
-                })
-                
-                # Подсвечиваем лучшие результаты (для карточек лучше меньше, но для простоты подсветим максимум)
-                st.table(res.style.highlight_max(subset=['Игрок 1', 'Игрок 2'], color='#90EE90', axis=1))
-            else:
-                st.error("Данные не найдены. Возможно, игрок не участвовал в этом турнире.")
-
-        # ЛОГИКА ДЛЯ ОТДЕЛЬНЫХ МАТЧЕЙ
-        elif mode == "Последние 5 матчей":
-            logs1 = get_match_logs(p1_id)
-            logs2 = get_match_logs(p2_id)
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.subheader("Игрок 1: Форма")
-                if logs1 is not None and not logs1.empty:
-                    # Выбираем только самые интересные колонки для отображения
-                    display_logs = logs1[['Date', 'Comp', 'Opponent', 'Min', 'Gls', 'Ast', 'xG']]
-                    st.dataframe(display_logs)
+        col1, col2 = st.columns(2)
+        for col, logs, name in zip([col1, col2], [l1, l2], [p1_select, p2_select]):
+            with col:
+                st.subheader(name)
+                if logs is not None:
+                    st.dataframe(logs.reset_index()[['Date', 'Opponent', 'Gls', 'xG']])
                 else:
-                    st.warning("Нет данных о матчах.")
-                    
-            with col2:
-                st.subheader("Игрок 2: Форма")
-                if logs2 is not None and not logs2.empty:
-                    display_logs = logs2[['Date', 'Comp', 'Opponent', 'Min', 'Gls', 'Ast', 'xG']]
-                    st.dataframe(display_logs)
-                else:
-                    st.warning("Нет данных о матчах.")
+                    st.error("Нет данных")
