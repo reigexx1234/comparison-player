@@ -1,4 +1,3 @@
 streamlit
 soccerdata
 pandas
-matplotlib
